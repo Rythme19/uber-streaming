@@ -45,10 +45,13 @@ uber-streaming/
 
 ---
 
-## 4️⃣ Docker Setup
+## Start Project
 
 Start the required services:
 
 ```bash
 docker-compose up -d
+sbt clean compile
+sbt "runMain com.example.producer.SparkKafkaProducer"
+sbt "runMain com.example.streaming.SparkStreamingApp"
 
