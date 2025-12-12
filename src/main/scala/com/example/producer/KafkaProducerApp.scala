@@ -1,18 +1,12 @@
 package com.example.producer
 
-import org.apache.spark.sql.{SparkSession, DataFrame}
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.functions._
-import scala.util.Try
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
+import java.util.Properties
 
 object KafkaProducerApp {
-
   def main(args: Array[String]): Unit = {
-
-    // Lecture des arguments ou valeurs par défaut
-    val kafkaBootstrap = sys.props.getOrElse("kafka.bootstrap", "localhost:9092")
-    val topic = sys.props.getOrElse("topic", "uber_topic")
-    val csvFile = sys.props.getOrElse("file", "ncr_ride_bookings.csv")
-    val numPartitions = sys.props.getOrElse("partitions", "5").toInt
 
     val spark = SparkSession.builder()
       .appName("KafkaCSVProducerApp")
@@ -20,34 +14,39 @@ object KafkaProducerApp {
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
+    import spark.implicits._
+
+    val kafkaBootstrap = sys.props.getOrElse("kafka.bootstrap", "localhost:9092")
+    val topic = sys.props.getOrElse("topic", "uber_topic")
+    val csvPath = sys.props.getOrElse("file", "ncr_ride_bookings.csv")
 
     // Lire le CSV
     val csvDF = spark.read
       .option("header", "true")
       .option("inferSchema", "true")
-      .csv(csvFile)
-      .repartition(numPartitions) // Partitionnement pour envoi par lot
+      .csv(csvPath)
 
-    println(s" CSV loaded with ${csvDF.count()} rows, repartitioned into $numPartitions partitions.")
+    // Configuration Kafka Producer
+    val props = new Properties()
+    props.put("bootstrap.servers", kafkaBootstrap)
+    props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+    props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
 
-    // Convertir chaque partition en JSON et envoyer à Kafka
-    csvDF.foreachPartition { partition =>
-      val kafkaProps = new java.util.Properties()
-      kafkaProps.put("bootstrap.servers", kafkaBootstrap)
-      kafkaProps.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
-      kafkaProps.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
-      val producer = new org.apache.kafka.clients.producer.KafkaProducer[String, String](kafkaProps)
-
-      partition.foreach { row =>
-        val jsonValue = csvDF.columns.map(c => s""""$c":"${row.getAs[Any](c)}"""").mkString("{", ",", "}")
-        val record = new org.apache.kafka.clients.producer.ProducerRecord[String, String](topic, jsonValue)
-        producer.send(record)
+    // Envoyer par partition (batch)
+    csvDF.foreachPartition { partition: Iterator[Row] =>
+      val producer = new KafkaProducer[String, String](props)
+      partition.foreach { row: Row =>
+        // Convertir la ligne en JSON
+        val json = row.getValuesMap[Any](row.schema.fieldNames).map {
+          case (k, v) => s""""$k": "${v.toString}""""
+        }.mkString("{", ",", "}")
+        producer.send(new ProducerRecord[String, String](topic, json))
       }
+      producer.flush()
       producer.close()
     }
 
-    println(s"All partitions sent to Kafka topic: $topic")
-
+    println(s"CSV data successfully published to Kafka topic: $topic")
     spark.stop()
   }
 }
